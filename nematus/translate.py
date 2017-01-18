@@ -9,6 +9,7 @@ import numpy
 import json
 import cPickle as pkl
 
+from collections import OrderedDict
 from multiprocessing import Process, Queue
 from util import load_dict, load_config
 from compat import fill_options
@@ -32,7 +33,7 @@ def translate_model(queue, rqueue, pid, models, options, k, normalize, verbose, 
 
 
         # load model parameters and set theano shared variables
-        params = numpy.load(model)
+        params = load_params(model, params)
         tparams = init_theano_params(params)
 
         # word index

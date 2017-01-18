@@ -20,6 +20,7 @@ from alignment_util import *
 layers = {'ff': ('param_init_fflayer', 'fflayer'),
           'gru': ('param_init_gru', 'gru_layer'),
           'gru_cond': ('param_init_gru_cond', 'gru_cond_layer'),
+          'embedding': {'param_init_embedding_layer', 'embedding_layer'}
           }
 
 
@@ -67,6 +68,34 @@ def fflayer(tparams, state_below, options, prefix='rconv',
         tensor.dot(state_below, tparams[pp(prefix, 'W')]) +
         tparams[pp(prefix, 'b')])
 
+# embedding layer
+def param_init_embedding_layer(options, params, n_words, dims, factors=None, prefix='', suffix=''):
+    if factors == None:
+        factors = 1
+        dims = [dims]
+    for factor in xrange(factors):
+        params[prefix+embedding_name(factor)+suffix] = norm_weight(n_words, dims[factor])
+    return params
+
+def embedding_layer(tparams, ids, factors=None, prefix='', suffix=''):
+    do_reshape = False
+    if factors == None:
+        if ids.ndim > 1:
+            do_reshape = True
+            n_timesteps = ids.shape[0]
+            n_samples = ids.shape[1]
+        emb = tparams[prefix+embedding_name(0)+suffix][ids.flatten()]
+    else:
+        if ids.ndim > 2:
+          do_reshape = True
+          n_timesteps = ids.shape[1]
+          n_samples = ids.shape[2]
+        emb_list = [tparams[prefix+embedding_name(factor)+suffix][ids[factor].flatten()] for factor in xrange(factors)]
+        emb = concatenate(emb_list, axis=1)
+    if do_reshape:
+        emb = emb.reshape((n_timesteps, n_samples, -1))
+
+    return emb
 
 # GRU layer
 def param_init_gru(options, params, prefix='gru', nin=None, dim=None):
@@ -122,11 +151,9 @@ def gru_layer(tparams, state_below, options, prefix='gru', mask=None,
 
     # state_below is the input word embeddings
     # input to the gates, concatenated
-    state_below_ = tensor.dot(state_below*emb_dropout[0], tparams[pp(prefix, 'W')]) + \
-        tparams[pp(prefix, 'b')]
+    state_below_ = tensor.dot(state_below*emb_dropout[0], tparams[pp(prefix, 'W')]) + tparams[pp(prefix, 'b')]
     # input to compute the hidden state proposal
-    state_belowx = tensor.dot(state_below*emb_dropout[1], tparams[pp(prefix, 'Wx')]) + \
-        tparams[pp(prefix, 'bx')]
+    state_belowx = tensor.dot(state_below*emb_dropout[1], tparams[pp(prefix, 'Wx')]) + tparams[pp(prefix, 'bx')]
 
     # step function to be used by scan
     # arguments    | sequences |outputs-info| non-seqs
@@ -272,8 +299,7 @@ def gru_cond_layer(tparams, state_below, options, prefix='gru',
     # projected context
     assert context.ndim == 3, 'Context must be 3-d: #annotation x #sample x dim'
     if pctx_ is None:
-        pctx_ = tensor.dot(context*ctx_dropout[0], tparams[pp(prefix, 'Wc_att')]) +\
-            tparams[pp(prefix, 'b_att')]
+        pctx_ = tensor.dot(context*ctx_dropout[0], tparams[pp(prefix, 'Wc_att')]) + tparams[pp(prefix, 'b_att')]
 
     def _slice(_x, n, dim):
         if _x.ndim == 3:
@@ -281,12 +307,10 @@ def gru_cond_layer(tparams, state_below, options, prefix='gru',
         return _x[:, n*dim:(n+1)*dim]
 
     # state_below is the previous output word embedding
-    state_belowx = tensor.dot(state_below*emb_dropout[0], tparams[pp(prefix, 'Wx')]) +\
-        tparams[pp(prefix, 'bx')]
-    state_below_ = tensor.dot(state_below*emb_dropout[1], tparams[pp(prefix, 'W')]) +\
-        tparams[pp(prefix, 'b')]
+    state_below_ = tensor.dot(state_below*emb_dropout[0], tparams[pp(prefix, 'W')]) + tparams[pp(prefix, 'b')]
+    state_belowx = tensor.dot(state_below*emb_dropout[1], tparams[pp(prefix, 'Wx')]) + tparams[pp(prefix, 'bx')]
 
-    def _step_slice(m_, x_, xx_, h_, ctx_, alpha_, pctx_, cc_, rec_dropout, ctx_dropout,
+    def _step_slice(m_, x_, xx_, h_, ctx_, alpha_, pctx_, cc_, rec_dropout, ctx_dropout, 
                     U, Wc, W_comb_att, U_att, c_tt, Ux, Wcx,
                     U_nl, Ux_nl, b_nl, bx_nl):
 

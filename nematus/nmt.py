@@ -3,6 +3,7 @@
 '''
 Build a neural machine translation model with soft attention
 '''
+
 import theano
 import theano.tensor as tensor
 from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
@@ -88,10 +89,8 @@ def init_params(options):
     params = OrderedDict()
 
     # embedding
-    for factor in range(options['factors']):
-        params[embedding_name(factor)] = norm_weight(options['n_words_src'], options['dim_per_factor'][factor])
-
-    params['Wemb_dec'] = norm_weight(options['n_words'], options['dim_word'])
+    params = get_layer_param('embedding')(options, params, options['n_words_src'], options['dim_per_factor'], options['factors'], suffix='')
+    params = get_layer_param('embedding')(options, params, options['n_words'], options['dim_word'], suffix='_dec')
 
     # encoder: bidirectional RNN
     params = get_layer_param(options['encoder'])(options, params,
@@ -179,13 +178,10 @@ def build_encoder(tparams, options, trng, use_noise, x_mask=None, sampling=False
         rec_dropout_r = theano.shared(numpy.array([1.]*2, dtype='float32'))
         emb_dropout = theano.shared(numpy.array([1.]*2, dtype='float32'))
         emb_dropout_r = theano.shared(numpy.array([1.]*2, dtype='float32'))
+        
 
     # word embedding for forward rnn (source)
-    emb = []
-    for factor in range(options['factors']):
-        emb.append(tparams[embedding_name(factor)][x[factor].flatten()])
-    emb = concatenate(emb, axis=1)
-    emb = emb.reshape([n_timesteps, n_samples, options['dim_word']])
+    emb = get_layer_constr('embedding')(tparams, x, suffix='', factors= options['factors'])
     if options['use_dropout']:
         emb *= source_dropout
 
@@ -198,11 +194,7 @@ def build_encoder(tparams, options, trng, use_noise, x_mask=None, sampling=False
 
 
     # word embedding for backward rnn (source)
-    embr = []
-    for factor in range(options['factors']):
-        embr.append(tparams[embedding_name(factor)][xr[factor].flatten()])
-    embr = concatenate(embr, axis=1)
-    embr = embr.reshape([n_timesteps, n_samples, options['dim_word']])
+    embr = get_layer_constr('embedding')(tparams, xr, suffix='', factors= options['factors'])
     if options['use_dropout']:
         if sampling:
             embr *= source_dropout
@@ -266,25 +258,25 @@ def build_model(tparams, options):
     # ctx_mean = concatenate([proj[0][-1], projr[0][-1]], axis=proj[0].ndim-2)
 
     if options['use_dropout']:
-        ctx_mean *= shared_dropout_layer((n_samples, 2*options['dim']), use_noise, trng, retain_probability_hidden, scaled)
+        prior_ctx_mean = ctx_mean
+        ctx_mean = ctx_mean * shared_dropout_layer((n_samples, 2*options['dim']), use_noise, trng, retain_probability_hidden, scaled)
 
     # initial decoder state
-    init_state = get_layer_constr('ff')(tparams, ctx_mean, options,
-                                    prefix='ff_state', activ='tanh')
+    pre_init_state = get_layer_constr('ff')(tparams, ctx_mean, options,
+                                    prefix='ff_state', activ='linear')
+    init_state = tensor.tanh(pre_init_state)
 
     # word embedding (target), we will shift the target sequence one time step
     # to the right. This is done because of the bi-gram connections in the
     # readout and decoder rnn. The first target will be all zeros and we will
     # not condition on the last output.
-    emb = tparams['Wemb_dec'][y.flatten()]
-    emb = emb.reshape([n_timesteps_trg, n_samples, options['dim_word']])
+    emb = get_layer_constr('embedding')(tparams, y, suffix='_dec')
+    if options['use_dropout']:
+        emb *= target_dropout
 
     emb_shifted = tensor.zeros_like(emb)
     emb_shifted = tensor.set_subtensor(emb_shifted[1:], emb[:-1])
     emb = emb_shifted
-
-    if options['use_dropout']:
-        emb *= target_dropout
 
     # decoder - pass through the decoder conditional gru with attention
     proj = get_layer_constr(options['decoder'])(tparams, emb, options,
@@ -304,9 +296,10 @@ def build_model(tparams, options):
     ctxs = proj[1]
 
     if options['use_dropout']:
-        proj_h *= shared_dropout_layer((n_samples, options['dim']), use_noise, trng, retain_probability_hidden, scaled)
-        emb *= shared_dropout_layer((n_samples, options['dim_word']), use_noise, trng, retain_probability_emb, scaled)
-        ctxs *= shared_dropout_layer((n_samples, 2*options['dim']), use_noise, trng, retain_probability_hidden, scaled)
+        prior_proj_h, prior_emb, prior_ctxs = proj_h, emb, ctxs
+        proj_h = proj_h * shared_dropout_layer((n_samples, options['dim']), use_noise, trng, retain_probability_hidden, scaled)
+        emb = emb * shared_dropout_layer((n_samples, options['dim_word']), use_noise, trng, retain_probability_emb, scaled)
+        ctxs = ctxs * shared_dropout_layer((n_samples, 2*options['dim']), use_noise, trng, retain_probability_hidden, scaled)
 
     # weights (alignment matrix) #####LIUCAN: this is where the attention vector is.
     opt_ret['dec_alphas'] = proj[2]
@@ -318,16 +311,18 @@ def build_model(tparams, options):
                                     prefix='ff_logit_prev', activ='linear')
     logit_ctx = get_layer_constr('ff')(tparams, ctxs, options,
                                    prefix='ff_logit_ctx', activ='linear')
-    logit = tensor.tanh(logit_lstm+logit_prev+logit_ctx)
+
+    logit = tensor.tanh(logit_lstm + logit_prev + logit_ctx)
 
     if options['use_dropout']:
-        logit *= shared_dropout_layer((n_samples, options['dim_word']), use_noise, trng, retain_probability_hidden, scaled)
+        prior_logit = logit
+        logit = logit * shared_dropout_layer((n_samples, options['dim_word']), use_noise, trng, retain_probability_hidden, scaled)
 
-    logit = get_layer_constr('ff')(tparams, logit, options,
+    logit2 = get_layer_constr('ff')(tparams, logit, options,
                                    prefix='ff_logit', activ='linear')
-    logit_shp = logit.shape
-    probs = tensor.nnet.softmax(logit.reshape([logit_shp[0]*logit_shp[1],
-                                               logit_shp[2]]))
+    logit2_shp = logit2.shape
+    probs = tensor.nnet.softmax(logit2.reshape([logit2_shp[0]*logit2_shp[1],
+                                               logit2_shp[2]]))
 
     # cost
     y_flat = y.flatten()
@@ -365,11 +360,14 @@ def build_sampler(tparams, options, use_noise, trng, return_alignment=False):
     ctx_mean = ctx.mean(0)
     # ctx_mean = concatenate([proj[0][-1],projr[0][-1]], axis=proj[0].ndim-2)
 
+    prior_ctx_mean = ctx_mean
     if options['use_dropout'] and options['model_version'] < 0.1:
-        ctx_mean *= retain_probability_hidden
+        ctx_mean = ctx_mean * retain_probability_hidden
 
-    init_state = get_layer_constr('ff')(tparams, ctx_mean, options,
-                                    prefix='ff_state', activ='tanh')
+    # initial decoder state
+    pre_init_state = get_layer_constr('ff')(tparams, ctx_mean, options,
+                                    prefix='ff_state', activ='linear')
+    init_state = tensor.tanh(pre_init_state)
 
     print >>sys.stderr, 'Building f_init...',
     outs = [init_state, ctx]
@@ -381,12 +379,13 @@ def build_sampler(tparams, options, use_noise, trng, return_alignment=False):
     init_state = tensor.matrix('init_state', dtype='float32')
 
     # if it's the first word, emb should be all zero and it is indicated by -1
-    emb = tensor.switch(y[:, None] < 0,
-                        tensor.alloc(0., 1, tparams['Wemb_dec'].shape[1]),
-                        tparams['Wemb_dec'][y])
-
+    emb = get_layer_constr('embedding')(tparams, y, suffix='_dec')
     if options['use_dropout'] and options['model_version'] < 0.1:
-        emb *= target_dropout
+        emb = emb * target_dropout
+    emb = tensor.switch(y[:, None] < 0,
+                        tensor.zeros((1, options['dim_word'])),
+                        emb)
+
 
     # apply one step of conditional gru with attention
     proj = get_layer_constr(options['decoder'])(tparams, emb, options,
@@ -407,10 +406,11 @@ def build_sampler(tparams, options, use_noise, trng, return_alignment=False):
     # alignment matrix (attention model)
     dec_alphas = proj[2]
 
+    prior_state_up, prior_emb, prior_ctxs = next_state, emb, ctxs
     if options['use_dropout'] and options['model_version'] < 0.1:
         next_state_up = next_state * retain_probability_hidden
-        emb *= retain_probability_emb
-        ctxs *= retain_probability_hidden
+        emb = emb * retain_probability_emb
+        ctxs = ctxs * retain_probability_hidden
     else:
         next_state_up = next_state
 
@@ -422,14 +422,15 @@ def build_sampler(tparams, options, use_noise, trng, return_alignment=False):
                                    prefix='ff_logit_ctx', activ='linear')
     logit = tensor.tanh(logit_lstm+logit_prev+logit_ctx)
 
+    prior_logit = logit
     if options['use_dropout'] and options['model_version'] < 0.1:
-        logit *= retain_probability_hidden
+        logit = logit * retain_probability_hidden
 
-    logit = get_layer_constr('ff')(tparams, logit, options,
-                              prefix='ff_logit', activ='linear')
+    logit2 = get_layer_constr('ff')(tparams, logit, options,
+                                   prefix='ff_logit', activ='linear')
 
     # compute the softmax probability
-    next_probs = tensor.nnet.softmax(logit)
+    next_probs = tensor.nnet.softmax(logit2)
 
     # sample from softmax distribution to get the sample
     next_sample = trng.multinomial(pvals=next_probs).argmax(1)
@@ -534,10 +535,10 @@ def build_full_sampler(tparams, options, use_noise, trng, greedy=False):
     def decoder_step(y, init_state, ctx, pctx_, target_dropout, emb_dropout, rec_dropout, ctx_dropout, *shared_vars):
 
         # if it's the first word, emb should be all zero and it is indicated by -1
+        emb = get_layer_constr('embedding')(tparams, y, suffix='_dec')
         emb = tensor.switch(y[:, None] < 0,
-                            tensor.alloc(0., 1, tparams['Wemb_dec'].shape[1]),
-                            tparams['Wemb_dec'][y])
-
+                            tensor.zeros((1, options['dim_word'])),
+                            emb)
         emb *= target_dropout
 
         # apply one step of conditional gru with attention
@@ -949,6 +950,7 @@ def train(dim_word=100,  # word vector dimensionality
           mrt_loss="SENTENCEBLEU n=4", # loss function for minimum risk training
           mrt_ml_mix=0, # interpolate mrt loss with ML loss
           model_version=0.1, #store version used for training for compatibility
+          prior_model=None, # Prior model file, used for MAP
     ):
 
     # Model options
@@ -965,6 +967,7 @@ def train(dim_word=100,  # word vector dimensionality
     assert(len(dictionaries) == factors + 1) # one dictionary per source factor + 1 for target factor
     assert(len(model_options['dim_per_factor']) == factors) # each factor embedding has its own dimensionality
     assert(sum(model_options['dim_per_factor']) == model_options['dim_word']) # dimensionality of factor embeddings sums up to total dimensionality of input embedding vector
+    assert(prior_model != None and (os.path.exists(prior_model)) or (map_decay_c==0.0)) # MAP training requires a prior model file
 
     # load dictionaries and invert them
     worddicts = [None] * len(dictionaries)
@@ -1029,12 +1032,22 @@ def train(dim_word=100,  # word vector dimensionality
 
     print 'Building model'
     params = init_params(model_options)
-    # reload parameters
+
+    # prepare parameters
     if reload_ and os.path.exists(saveto):
         print 'Reloading model parameters'
         params = load_params(saveto, params)
+    elif prior_model:
+        print 'Initializing model parameters from prior'
+        params = load_params(prior_model, params)
+
+    # load prior model if specified
+    if prior_model:
+        print 'Loading prior model parameters'
+        params = load_params(prior_model, params, with_prefix='prior_')
 
     tparams = init_theano_params(params)
+    #ipdb.set_trace()
 
     trng, use_noise, \
         x, x_mask, y, y_mask, \
@@ -1074,6 +1087,8 @@ def train(dim_word=100,  # word vector dimensionality
         decay_c = theano.shared(numpy.float32(decay_c), name='decay_c')
         weight_decay = 0.
         for kk, vv in tparams.iteritems():
+            if kk.startswith('prior_'):
+                continue
             weight_decay += (vv ** 2).sum()
         weight_decay *= decay_c
         cost += weight_decay
@@ -1086,27 +1101,38 @@ def train(dim_word=100,  # word vector dimensionality
              opt_ret['dec_alphas'].sum(0))**2).sum(1).mean()
         cost += alpha_reg
 
-     # apply L2 regularisation to loaded model (map training)
+    # apply L2 regularisation to loaded model (map training)
     if map_decay_c > 0:
         map_decay_c = theano.shared(numpy.float32(map_decay_c), name="map_decay_c")
         weight_map_decay = 0.
         for kk, vv in tparams.iteritems():
-            init_value = theano.shared(vv.get_value(), name= kk + "_init")
+            if kk.startswith('prior_'):
+                continue
+            init_value = tparams['prior_' + kk]
             weight_map_decay += ((vv -init_value) ** 2).sum()
         weight_map_decay *= map_decay_c
         cost += weight_map_decay
 
+    # after all regularizers - compile the computational graph for cost
+    print 'Building f_cost...',
+    f_cost = theano.function(inps, cost, profile=profile)
+    print 'Done'
+
+    updated_params = OrderedDict(tparams)
+
+    # don't update prior model parameters
+    if prior_model:
+        updated_params = OrderedDict([(key,value) for (key,value) in updated_params.iteritems() if not key.startswith('prior_')])
+
     # allow finetuning with fixed embeddings
     if finetune:
-        updated_params = OrderedDict([(key,value) for (key,value) in tparams.iteritems() if not key.startswith('Wemb')])
-    else:
-        updated_params = tparams
+        updated_params = OrderedDict([(key,value) for (key,value) in updated_params.iteritems() if not key.startswith('Wemb')])
 
     # allow finetuning of only last layer (becomes a linear model training problem)
     if finetune_only_last:
-        updated_params = OrderedDict([(key,value) for (key,value) in tparams.iteritems() if key in ['ff_logit_W', 'ff_logit_b']])
-    else:
-        updated_params = tparams
+        updated_params = OrderedDict([(key,value) for (key,value) in updated_params.iteritems() if key in ['ff_logit_W', 'ff_logit_b']])
+
+    #ipdb.set_trace()
 
     print 'Computing gradient...',
     grads = tensor.grad(cost, wrt=itemlist(updated_params))
@@ -1262,7 +1288,8 @@ def train(dim_word=100,  # word vector dimensionality
                 if best_p is not None:
                     params = best_p
                 else:
-                    params = unzip_from_theano(tparams)
+                    params = unzip_from_theano(tparams, excluding_prefix='prior_')
+                #ipdb.set_trace()
                 numpy.savez(saveto, history_errs=history_errs, uidx=uidx, **params)
                 print 'Done'
 
@@ -1272,7 +1299,7 @@ def train(dim_word=100,  # word vector dimensionality
                     saveto_uidx = '{}.iter{}.npz'.format(
                         os.path.splitext(saveto)[0], uidx)
                     numpy.savez(saveto_uidx, history_errs=history_errs,
-                                uidx=uidx, **unzip_from_theano(tparams))
+                                uidx=uidx, **unzip_from_theano(tparams, excluding_prefix='prior_'))
                     print 'Done'
 
 
@@ -1342,7 +1369,7 @@ def train(dim_word=100,  # word vector dimensionality
                 history_errs.append(valid_err)
 
                 if uidx == 0 or valid_err <= numpy.array(history_errs).min():
-                    best_p = unzip_from_theano(tparams)
+                    best_p = unzip_from_theano(tparams, excluding_prefix='prior_')
                     bad_counter = 0
                 if len(history_errs) > patience and valid_err >= \
                         numpy.array(history_errs)[:-patience].min():
@@ -1374,7 +1401,7 @@ def train(dim_word=100,  # word vector dimensionality
                         p_validation.wait()
                         print "Waited for {0:.1f} seconds".format(time.time()-valid_wait_start)
                     print 'Saving  model...',
-                    params = unzip_from_theano(tparams)
+                    params = unzip_from_theano(tparams, excluding_prefix='prior_')
                     numpy.savez(saveto +'.dev', history_errs=history_errs, uidx=uidx, **params)
                     json.dump(model_options, open('%s.dev.npz.json' % saveto, 'wb'), indent=2)
                     print 'Done'
@@ -1405,7 +1432,7 @@ def train(dim_word=100,  # word vector dimensionality
     if best_p is not None:
         params = copy.copy(best_p)
     else:
-        params = unzip_from_theano(tparams)
+        params = unzip_from_theano(tparams, excluding_prefix='prior_')
     numpy.savez(saveto, zipped_params=best_p,
                 history_errs=history_errs,
                 uidx=uidx,
