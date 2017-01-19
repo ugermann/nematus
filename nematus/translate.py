@@ -30,7 +30,8 @@ def translate_model(queue, rqueue, pid, models, options, k, normalize, verbose, 
     fs_next = []
 
     for model, option in zip(models, options):
-
+        # allocate model parameters
+        params = init_params(option)
 
         # load model parameters and set theano shared variables
         params = load_params(model, params)

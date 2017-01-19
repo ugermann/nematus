@@ -51,22 +51,26 @@ def shared_dropout_layer(shape, use_noise, trng, value, scaled=True):
 
 # feedforward layer: affine transformation + point-wise nonlinearity
 def param_init_fflayer(options, params, prefix='ff', nin=None, nout=None,
-                       ortho=True):
+                       ortho=True, weight_matrix=True, bias=True):
     if nin is None:
         nin = options['dim_proj']
     if nout is None:
         nout = options['dim_proj']
-    params[pp(prefix, 'W')] = norm_weight(nin, nout, scale=0.01, ortho=ortho)
-    params[pp(prefix, 'b')] = numpy.zeros((nout,)).astype('float32')
+    if weight_matrix:
+        params[pp(prefix, 'W')] = norm_weight(nin, nout, scale=0.01, ortho=ortho)
+    if bias:
+       params[pp(prefix, 'b')] = numpy.zeros((nout,)).astype('float32')
 
     return params
 
 
 def fflayer(tparams, state_below, options, prefix='rconv',
-            activ='lambda x: tensor.tanh(x)', **kwargs):
-    return eval(activ)(
-        tensor.dot(state_below, tparams[pp(prefix, 'W')]) +
-        tparams[pp(prefix, 'b')])
+            activ='lambda x: tensor.tanh(x)', W=None, b=None, **kwargs):
+    if W == None:
+        W = tparams[pp(prefix, 'W')]
+    if b == None:
+        b = tparams[pp(prefix, 'b')]
+    return eval(activ)(tensor.dot(state_below, W) + b)
 
 # embedding layer
 def param_init_embedding_layer(options, params, n_words, dims, factors=None, prefix='', suffix=''):

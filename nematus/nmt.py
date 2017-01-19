@@ -90,7 +90,8 @@ def init_params(options):
 
     # embedding
     params = get_layer_param('embedding')(options, params, options['n_words_src'], options['dim_per_factor'], options['factors'], suffix='')
-    params = get_layer_param('embedding')(options, params, options['n_words'], options['dim_word'], suffix='_dec')
+    if not options['tie_encoder_decoder_embeddings']:
+        params = get_layer_param('embedding')(options, params, options['n_words'], options['dim_word'], suffix='_dec')
 
     # encoder: bidirectional RNN
     params = get_layer_param(options['encoder'])(options, params,
@@ -122,9 +123,12 @@ def init_params(options):
     params = get_layer_param('ff')(options, params, prefix='ff_logit_ctx',
                                 nin=ctxdim, nout=options['dim_word'],
                                 ortho=False)
+
+
     params = get_layer_param('ff')(options, params, prefix='ff_logit',
                                 nin=options['dim_word'],
-                                nout=options['n_words'])
+                                nout=options['n_words'],
+                                weight_matrix = not options['tie_decoder_output_embeddings'])
 
     return params
 
@@ -270,7 +274,8 @@ def build_model(tparams, options):
     # to the right. This is done because of the bi-gram connections in the
     # readout and decoder rnn. The first target will be all zeros and we will
     # not condition on the last output.
-    emb = get_layer_constr('embedding')(tparams, y, suffix='_dec')
+    decoder_embedding_suffix = '' if options['tie_encoder_decoder_embeddings'] else '_dec'
+    emb = get_layer_constr('embedding')(tparams, y, suffix=decoder_embedding_suffix)
     if options['use_dropout']:
         emb *= target_dropout
 
@@ -318,8 +323,9 @@ def build_model(tparams, options):
         prior_logit = logit
         logit = logit * shared_dropout_layer((n_samples, options['dim_word']), use_noise, trng, retain_probability_hidden, scaled)
 
+    logit2_W = tparams['Wemb' + decoder_embedding_suffix].T if options['tie_decoder_output_embeddings'] else None
     logit2 = get_layer_constr('ff')(tparams, logit, options,
-                                   prefix='ff_logit', activ='linear')
+                                   prefix='ff_logit', activ='linear', W=logit2_W)
     logit2_shp = logit2.shape
     probs = tensor.nnet.softmax(logit2.reshape([logit2_shp[0]*logit2_shp[1],
                                                logit2_shp[2]]))
@@ -379,7 +385,8 @@ def build_sampler(tparams, options, use_noise, trng, return_alignment=False):
     init_state = tensor.matrix('init_state', dtype='float32')
 
     # if it's the first word, emb should be all zero and it is indicated by -1
-    emb = get_layer_constr('embedding')(tparams, y, suffix='_dec')
+    decoder_embedding_suffix = '' if options['tie_encoder_decoder_embeddings'] else '_dec'
+    emb = get_layer_constr('embedding')(tparams, y, suffix=decoder_embedding_suffix)
     if options['use_dropout'] and options['model_version'] < 0.1:
         emb = emb * target_dropout
     emb = tensor.switch(y[:, None] < 0,
@@ -426,8 +433,9 @@ def build_sampler(tparams, options, use_noise, trng, return_alignment=False):
     if options['use_dropout'] and options['model_version'] < 0.1:
         logit = logit * retain_probability_hidden
 
+    logit2_W = tparams['Wemb' + decoder_embedding_suffix].T if options['tie_decoder_output_embeddings'] else None
     logit2 = get_layer_constr('ff')(tparams, logit, options,
-                                   prefix='ff_logit', activ='linear')
+                                   prefix='ff_logit', activ='linear', W=logit2_W)
 
     # compute the softmax probability
     next_probs = tensor.nnet.softmax(logit2)
@@ -535,7 +543,8 @@ def build_full_sampler(tparams, options, use_noise, trng, greedy=False):
     def decoder_step(y, init_state, ctx, pctx_, target_dropout, emb_dropout, rec_dropout, ctx_dropout, *shared_vars):
 
         # if it's the first word, emb should be all zero and it is indicated by -1
-        emb = get_layer_constr('embedding')(tparams, y, suffix='_dec')
+        decoder_embedding_suffix = '' if options['tie_encoder_decoder_embeddings'] else '_dec'
+        emb = get_layer_constr('embedding')(tparams, y, suffix=decoder_embedding_suffix)
         emb = tensor.switch(y[:, None] < 0,
                             tensor.zeros((1, options['dim_word'])),
                             emb)
@@ -582,11 +591,12 @@ def build_full_sampler(tparams, options, use_noise, trng, greedy=False):
         if options['use_dropout'] and options['model_version'] < 0.1:
             logit *= retain_probability_hidden
 
-        logit = get_layer_constr('ff')(tparams, logit, options,
-                                prefix='ff_logit', activ='linear')
+        logit2_W = tparams['Wemb' + decoder_embedding_suffix].T if options['tie_decoder_output_embeddings'] else None
+        logit2 = get_layer_constr('ff')(tparams, logit, options,
+                                   prefix='ff_logit', activ='linear', W=logit2_W)
 
         # compute the softmax probability
-        next_probs = tensor.nnet.softmax(logit)
+        next_probs = tensor.nnet.softmax(logit2)
 
         if greedy:
             next_sample = next_probs.argmax(1)
@@ -951,6 +961,8 @@ def train(dim_word=100,  # word vector dimensionality
           mrt_ml_mix=0, # interpolate mrt loss with ML loss
           model_version=0.1, #store version used for training for compatibility
           prior_model=None, # Prior model file, used for MAP
+          tie_encoder_decoder_embeddings=False, # Tie the input embeddings of the encoder and the decoder (first factor only)
+          tie_decoder_output_embeddings=False, # Tie the input embeddings of the decoder with the softmax output embeddings
     ):
 
     # Model options
