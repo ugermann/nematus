@@ -19,6 +19,7 @@ import os
 import warnings
 import sys
 import time
+import warnings 
 
 import itertools
 
@@ -997,6 +998,11 @@ def train(dim_word=100,  # word vector dimensionality
         n_words = len(worddicts[1])
         model_options['n_words'] = n_words
 
+    if tie_encoder_decoder_embeddings:
+        assert (n_words_src == n_words), "When tying encoder and decoder embeddings, source and target vocabulary size must the same"
+        if worddicts[0] != worddicts[1]:
+            warn("Encoder-decoder embedding tying is enabled with different source and target dictionaries. This is usually a configuration error")
+
     if model_options['objective'] == 'MRT':
         # in CE mode parameters are updated once per batch; in MRT mode parameters are updated once
         # per pair of train sentences (== per batch of samples), so we set batch_size to 1 to make
@@ -1014,6 +1020,7 @@ def train(dim_word=100,  # word vector dimensionality
                          n_words_source=n_words_src, n_words_target=n_words,
                          batch_size=batch_size,
                          maxlen=maxlen,
+                         skip_empty=True,
                          shuffle_each_epoch=shuffle_each_epoch,
                          sort_by_length=sort_by_length,
                          indomain_source=domain_interpolation_indomain_datasets[0],
