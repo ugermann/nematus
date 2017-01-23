@@ -1501,6 +1501,10 @@ if __name__ == '__main__':
                          help="dropout source words (0: no dropout) (default: %(default)s)")
     network.add_argument('--dropout_target', type=float, default=0, metavar="FLOAT",
                          help="dropout target words (0: no dropout) (default: %(default)s)")
+    network.add_argument('--tie_encoder_decoder_embeddings', action="store_true", dest="tie_encoder_decoder_embeddings",
+                         help="tie the input embeddings of the encoder and the decoder (first factor only). Source and target vocabulary size must the same")
+    network.add_argument('--tie_decoder_output_embeddings', action="store_true", dest="tie_decoder_output_embeddings",
+                         help="tie the input embeddings of the decoder with the softmax output embeddings")
     #network.add_argument('--encoder', type=str, default='gru',
                          #choices=['gru'],
                          #help='encoder recurrent layer')
