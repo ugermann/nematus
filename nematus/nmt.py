@@ -195,6 +195,7 @@ def build_encoder(tparams, options, trng, use_noise, x_mask=None, sampling=False
                                             mask=x_mask,
                                             emb_dropout=emb_dropout,
                                             rec_dropout=rec_dropout,
+                                            truncate_gradient=options['encoder_truncate_gradient'],
                                             profile=profile)
 
 
@@ -212,6 +213,7 @@ def build_encoder(tparams, options, trng, use_noise, x_mask=None, sampling=False
                                              mask=xr_mask,
                                              emb_dropout=emb_dropout_r,
                                              rec_dropout=rec_dropout_r,
+                                             truncate_gradient=options['encoder_truncate_gradient'],
                                              profile=profile)
 
     # context will be the concatenation of forward and backward rnns
@@ -294,6 +296,7 @@ def build_model(tparams, options):
                                             emb_dropout=emb_dropout_d,
                                             ctx_dropout=ctx_dropout_d,
                                             rec_dropout=rec_dropout_d,
+                                            truncate_gradient=options['decoder_truncate_gradient'],
                                             profile=profile)
     # hidden states of the decoder gru
     proj_h = proj[0]
@@ -404,6 +407,7 @@ def build_sampler(tparams, options, use_noise, trng, return_alignment=False):
                                             emb_dropout=emb_dropout_d,
                                             ctx_dropout=ctx_dropout_d,
                                             rec_dropout=rec_dropout_d,
+                                            truncate_gradient=options['decoder_truncate_gradient'],
                                             profile=profile)
     # get the next hidden state
     next_state = proj[0]
@@ -634,7 +638,7 @@ def build_full_sampler(tparams, options, use_noise, trng, greedy=False):
     (sample, state, probs), updates = theano.scan(decoder_step,
                         outputs_info=[init_w, init_state, None],
                         non_sequences=[ctx, pctx_, target_dropout, emb_dropout_d, rec_dropout_d, ctx_dropout_d]+shared_vars,
-                        n_steps=n_steps)
+                        n_steps=n_steps, truncate_gradient=options['decoder_truncate_gradient'],)
 
     print >>sys.stderr, 'Building f_sample...',
     if greedy:
@@ -964,6 +968,8 @@ def train(dim_word=100,  # word vector dimensionality
           prior_model=None, # Prior model file, used for MAP
           tie_encoder_decoder_embeddings=False, # Tie the input embeddings of the encoder and the decoder (first factor only)
           tie_decoder_output_embeddings=False, # Tie the input embeddings of the decoder with the softmax output embeddings
+          encoder_truncate_gradient=-1, # Truncate BPTT gradients in the encoder to this value. Use -1 for no truncation
+          decoder_truncate_gradient=-1, # Truncate BPTT gradients in the decoder to this value. Use -1 for no truncation
     ):
 
     # Model options
@@ -1542,6 +1548,10 @@ if __name__ == '__main__':
                          help='size of maxibatch (number of minibatches that are sorted by length) (default: %(default)s)')
     training.add_argument('--objective', choices=['CE', 'MRT'],
                          help='training objective. CE: cross-entropy minimization (default); MRT: Minimum Risk Training (https://www.aclweb.org/anthology/P/P16/P16-1159.pdf)')
+    training.add_argument('--encoder_truncate_gradient', type=int, default=-1, metavar='INT',
+                         help="truncate BPTT gradients in the encoder to this value. Use -1 for no truncation (default: %(default)s)")
+    training.add_argument('--decoder_truncate_gradient', type=int, default=-1, metavar='INT',
+                         help="truncate BPTT gradients in the encoder to this value. Use -1 for no truncation (default: %(default)s)")
 
     finetune = training.add_mutually_exclusive_group()
     finetune.add_argument('--finetune', action="store_true",
