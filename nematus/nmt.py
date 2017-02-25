@@ -1470,7 +1470,7 @@ def train(dim_word=100,  # word vector dimensionality
                     numpy.savez(saveto +'.dev', history_errs=history_errs, uidx=uidx, **params)
                     json.dump(model_options, open('%s.dev.npz.json' % saveto, 'wb'), indent=2)
                     print 'Done'
-                    p_validation = Popen([external_validation_script])
+                    p_validation = Popen(external_validation_script.strip().split())
 
             # finish after this many updates
             if uidx >= finish_after:
